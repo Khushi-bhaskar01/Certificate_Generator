@@ -3,20 +3,20 @@
 import { ChangeEvent, useEffect, useState } from "react";
 import QRCode from "qrcode";
 import { supabase } from "../lib/supabase";
-import DraggableTemplatePreview from "./components/DraggableTemplatePreview";
-import TemplateSelector from "./components/TemplateSelector";
-import type { Certificate, CustomLayout, Template, TemplateTypography } from "./components/types";
 
+type Template = { name: string; background?: string };
+type Certificate = { id: string; name: string; course: string; date: string; template: string; createdAt: string };
+type Position = { x: number; y: number };
+type CustomLayout = { box: Position; name: Position };
 type DragState = { element: "box" | "name"; offsetX: number; offsetY: number };
 
 const defaultTemplates: Template[] = [
-  { name: "Aurora Classic", colors: { background: "#e7f5ef", accent: "#145c4a", text: "#182a27" } },
-  { name: "Midnight Executive", colors: { background: "#10192f", accent: "#f6c969", text: "#ffffff" } },
-  { name: "Minimal Paper", colors: { background: "#f2eee4", accent: "#252525", text: "#252525" } }
+  { name: "Aurora Classic" },
+  { name: "Midnight Executive" },
+  { name: "Minimal Paper" }
 ];
 const starterFields = ["Recipient name", "Course or achievement", "Issue date"];
 const defaultCustomLayout: CustomLayout = { box: { x: 6, y: 72 }, name: { x: 8.5, y: 82 } };
-const defaultTypography: TemplateTypography = { label: 1.55, name: 5.45, body: 1.8, meta: 1.15 };
 
 async function createHash(value: string) {
   const bytes = new TextEncoder().encode(value);
@@ -50,11 +50,16 @@ export default function Home() {
   const [password, setPassword] = useState("");
   const [userId, setUserId] = useState<string | null>(null);
   const [authLoading, setAuthLoading] = useState(Boolean(supabase));
+  const [customLayouts, setCustomLayouts] = useState<Record<string, CustomLayout>>({});
   const [dragging, setDragging] = useState<DragState | null>(null);
 
   useEffect(() => {
     const load = async () => {
       try {
+        const savedTemplates = JSON.parse(localStorage.getItem("certify-templates") ?? "null");
+        if (Array.isArray(savedTemplates) && savedTemplates.length) setTemplates(savedTemplates);
+        const savedLayouts = JSON.parse(localStorage.getItem("certify-template-layouts") ?? "{}");
+        if (savedLayouts && typeof savedLayouts === "object") setCustomLayouts(savedLayouts);
         if (supabase) {
           const { data: sessionData } = await supabase.auth.getSession();
           const id = sessionData.session?.user.id ?? null;
@@ -63,14 +68,10 @@ export default function Home() {
             const { data, error } = await supabase.from("certificates").select("certificate_id, recipient_name, achievement, issue_date, created_at").eq("owner_id", id).order("created_at", { ascending: false });
             if (error) throw error;
             setCertificates((data ?? []).map((item) => ({ id: item.certificate_id, name: item.recipient_name, course: item.achievement, date: item.issue_date, template: currentTemplate.name, createdAt: item.created_at })));
-            const { data: templateData, error: templateError } = await supabase.from("templates").select("id, name, image_url, fields").eq("owner_id", id).order("created_at", { ascending: true });
-            if (templateError) throw templateError;
-            const savedTemplates = (templateData ?? []).map((item) => {
-              const saved = (item.fields ?? {}) as { colors?: Template["colors"]; typography?: TemplateTypography; layout?: CustomLayout; storagePath?: string };
-              return { id: item.id, name: item.name, background: item.image_url ?? undefined, colors: saved.colors, typography: saved.typography, layout: saved.layout, storagePath: saved.storagePath };
-            });
-            setTemplates([...defaultTemplates, ...savedTemplates]);
           }
+        } else {
+          const saved = JSON.parse(localStorage.getItem("certify-certificates") ?? "[]");
+          if (Array.isArray(saved)) setCertificates(saved);
         }
       } catch {
         setNotice("Saved certificate data could not be loaded.");
@@ -82,8 +83,7 @@ export default function Home() {
   }, []);
 
   const currentTemplate = templates[templateIndex] ?? templates[0];
-  const currentLayout = currentTemplate.layout ?? defaultCustomLayout;
-  const currentTypography = currentTemplate.typography ?? defaultTypography;
+  const currentLayout = customLayouts[currentTemplate.name] ?? defaultCustomLayout;
   const generatedCount = certificates.length;
 
   const startDragging = (element: "box" | "name", event: React.PointerEvent<HTMLElement>) => {
@@ -99,7 +99,7 @@ export default function Home() {
     event.currentTarget.setPointerCapture(event.pointerId);
   };
 
-  const updateLayout = async (event: React.PointerEvent<HTMLElement>) => {
+  const updateLayout = (event: React.PointerEvent<HTMLElement>) => {
     if (!dragging || !currentTemplate.background) return;
     if (!currentTemplate.background) return;
     const preview = event.currentTarget.closest(".certificate-preview") as HTMLElement | null;
@@ -109,31 +109,14 @@ export default function Home() {
       x: Math.max(0, Math.min(88, ((event.clientX - bounds.left) / bounds.width) * 100 - dragging.offsetX)),
       y: Math.max(0, Math.min(78, ((event.clientY - bounds.top) / bounds.height) * 100 - dragging.offsetY))
     };
-    if (!currentTemplate.id || !supabase) return;
-    const nextLayout = { ...currentLayout, [dragging.element]: nextPosition };
-    const nextTemplates = templates.map((template) => template.id === currentTemplate.id ? { ...template, layout: nextLayout } : template);
-    setTemplates(nextTemplates);
-    const { error } = await supabase.from("templates").update({ fields: { colors: currentTemplate.colors, layout: nextLayout } }).eq("id", currentTemplate.id).eq("owner_id", userId);
-    if (error) setNotice(`Could not save template position: ${error.message}`);
+    const next = { ...customLayouts, [currentTemplate.name]: { ...currentLayout, [dragging.element]: nextPosition } };
+    setCustomLayouts(next);
+    localStorage.setItem("certify-template-layouts", JSON.stringify(next));
   };
 
-  const updateTemplateColor = async (key: "background" | "accent" | "text", value: string) => {
-    const next = templates.map((template, index) => index === templateIndex ? { ...template, colors: { background: "#e7f5ef", accent: "#145c4a", text: "#182a27", ...template.colors, [key]: value } } : template);
-    setTemplates(next);
-    if (currentTemplate.id && supabase) {
-      const { error } = await supabase.from("templates").update({ fields: { colors: next[templateIndex].colors, typography: next[templateIndex].typography ?? defaultTypography, layout: currentTemplate.layout ?? defaultCustomLayout, storagePath: currentTemplate.storagePath } }).eq("id", currentTemplate.id).eq("owner_id", userId);
-      if (error) setNotice(`Could not save template colors: ${error.message}`);
-    }
-  };
-
-  const updateTemplateTypography = async (key: keyof TemplateTypography, value: number) => {
-    const nextTypography = { ...currentTypography, [key]: value };
-    const next = templates.map((template, index) => index === templateIndex ? { ...template, typography: nextTypography } : template);
-    setTemplates(next);
-    if (currentTemplate.id && supabase) {
-      const { error } = await supabase.from("templates").update({ fields: { colors: currentTemplate.colors, typography: nextTypography, layout: currentTemplate.layout ?? defaultCustomLayout, storagePath: currentTemplate.storagePath } }).eq("id", currentTemplate.id).eq("owner_id", userId);
-      if (error) setNotice(`Could not save text sizes: ${error.message}`);
-    }
+  const saveCertificates = (next: Certificate[]) => {
+    setCertificates(next);
+    localStorage.setItem("certify-certificates", JSON.stringify(next));
   };
 
   const issueCertificate = async (recipient: string, achievement: string, issued: string) => {
@@ -161,25 +144,25 @@ export default function Home() {
         return;
       }
     }
-    setCertificates([certificate, ...certificates.filter((item) => item.id !== id)]);
+    const next = [certificate, ...certificates.filter((item) => item.id !== id)];
+    saveCertificates(next);
     downloadCertificate(certificate, currentTemplate);
     setNotice(`Certificate created. Verification ID: ${id}`);
   };
 
   const downloadCertificate = async (certificate: Certificate, template: Template = currentTemplate) => {
-    const templateLayout = template.layout ?? defaultCustomLayout;
-    const colors = template.colors ?? { background: "#e7f5ef", accent: "#145c4a", text: "#182a27" };
+    const templateLayout = customLayouts[template.name] ?? defaultCustomLayout;
+    const colors = template.name.includes("Midnight") ? ["#10192f", "#f6c969"] : template.name.includes("Minimal") ? ["#f7f3eb", "#252525"] : ["#e7f5ef", "#145c4a"];
+    const textColor = template.name.includes("Midnight") ? "#fff" : "#182a27";
     const verificationUrl = `${window.location.origin}/verify/${certificate.id}`;
     const qrDataUrl = await QRCode.toDataURL(verificationUrl, { width: 220, margin: 1, errorCorrectionLevel: "H" });
-    const customColors = template.colors ?? { background: "#ffffff", accent: "#145c4a", text: "#172521" };
-    const typography = template.typography ?? defaultTypography;
     const background = template.background
       ? `<rect width="1600" height="1100" fill="#f7f7f4"/><image href="${escapeXml(template.background)}" x="20" y="20" width="1560" height="1060" preserveAspectRatio="xMidYMid meet"/>`
-      : `<rect width="1600" height="1100" fill="${colors.background}"/>`;
+      : `<rect width="1600" height="1100" fill="${colors[0]}"/>`;
     const overlay = template.background ? `<rect width="1600" height="1100" fill="#000" opacity=".18"/>` : "";
     const customContent = template.background
-      ? `<text x="${templateLayout.name.x * 16}" y="${templateLayout.name.y * 11 + typography.label * 11}" font-size="${typography.label * 11}" font-family="Arial" letter-spacing=".5" fill="${customColors.text}">Awarded to</text><text x="${templateLayout.name.x * 16}" y="${templateLayout.name.y * 11 + (typography.label + typography.name) * 11}" font-size="${typography.name * 11}" font-family="Georgia" fill="${customColors.accent}">${escapeXml(certificate.name)}</text><text x="${templateLayout.name.x * 16}" y="${templateLayout.name.y * 11 + (typography.label + typography.name + typography.body) * 11}" font-size="${typography.body * 11}" font-family="Arial" fill="${customColors.text}">has successfully completed</text><text x="${templateLayout.name.x * 16}" y="${templateLayout.name.y * 11 + (typography.label + typography.name + typography.body * 2) * 11}" font-size="${typography.body * 11}" font-family="Arial" fill="${customColors.text}">${escapeXml(certificate.course)} · ${escapeXml(certificate.date)}</text><text x="${templateLayout.name.x * 16}" y="${templateLayout.name.y * 11 + (typography.label + typography.name + typography.body * 3) * 11}" font-size="${typography.meta * 11}" font-family="monospace" fill="${customColors.accent}">Verification ID ${certificate.id}</text><rect x="${templateLayout.box.x * 16 + 1240}" y="${templateLayout.box.y * 11 + 47}" width="130" height="130" rx="5" fill="#fff"/><image href="${qrDataUrl}" x="${templateLayout.box.x * 16 + 1250}" y="${templateLayout.box.y * 11 + 57}" width="110" height="110"/>`
-      : `<rect x="45" y="45" width="1510" height="1010" rx="8" fill="none" stroke="${colors.accent}" stroke-width="5"/><circle cx="800" cy="205" r="60" fill="${colors.accent}"/><text x="800" y="220" text-anchor="middle" font-size="45" font-family="Georgia" fill="${colors.background}">✓</text><text x="800" y="380" text-anchor="middle" font-size="32" letter-spacing="9" font-family="Arial" fill="${colors.accent}">CERTIFICATE OF ACHIEVEMENT</text><text x="800" y="540" text-anchor="middle" font-size="78" font-family="Georgia" fill="${colors.text}">${escapeXml(certificate.name)}</text><text x="800" y="625" text-anchor="middle" font-size="28" font-family="Arial" fill="${colors.text}">has successfully completed</text><text x="800" y="710" text-anchor="middle" font-size="48" font-family="Georgia" fill="${colors.accent}">${escapeXml(certificate.course)}</text><text x="800" y="850" text-anchor="middle" font-size="24" font-family="Arial" fill="${colors.text}">Issued ${escapeXml(certificate.date)}  •  ID ${certificate.id}</text><image href="${qrDataUrl}" x="1350" y="840" width="150" height="150"/><text x="800" y="955" text-anchor="middle" font-size="18" font-family="Arial" fill="${colors.text}" opacity=".7">Scan QR to verify this certificate</text>`;
+      ? `<rect x="${templateLayout.box.x * 16}" y="${templateLayout.box.y * 11}" width="1410" height="245" rx="12" fill="#fff" opacity=".93"/><text x="${templateLayout.box.x * 16 + 40}" y="${templateLayout.box.y * 11 + 65}" font-size="22" font-family="Arial" fill="#172521">Awarded to</text><text x="${templateLayout.name.x * 16}" y="${templateLayout.name.y * 11 + 48}" font-size="48" font-family="Georgia" fill="#145c4a">${escapeXml(certificate.name)}</text><text x="${templateLayout.name.x * 16}" y="${templateLayout.name.y * 11 + 81}" font-size="18" font-family="Arial" fill="#172521">has successfully completed</text><text x="${templateLayout.name.x * 16}" y="${templateLayout.name.y * 11 + 118}" font-size="24" font-family="Arial" fill="#172521">${escapeXml(certificate.course)} · ${escapeXml(certificate.date)}</text><text x="${templateLayout.name.x * 16}" y="${templateLayout.name.y * 11 + 151}" font-size="15" font-family="monospace" fill="#145c4a">ID ${certificate.id}</text><image href="${qrDataUrl}" x="${templateLayout.box.x * 16 + 1185}" y="${templateLayout.box.y * 11 + 15}" width="190" height="190"/>`
+      : `<rect x="45" y="45" width="1510" height="1010" rx="8" fill="none" stroke="${colors[1]}" stroke-width="5"/><circle cx="800" cy="205" r="60" fill="${colors[1]}"/><text x="800" y="220" text-anchor="middle" font-size="45" font-family="Georgia" fill="${colors[0]}">✓</text><text x="800" y="380" text-anchor="middle" font-size="32" letter-spacing="9" font-family="Arial" fill="${colors[1]}">CERTIFICATE OF ACHIEVEMENT</text><text x="800" y="540" text-anchor="middle" font-size="78" font-family="Georgia" fill="${textColor}">${escapeXml(certificate.name)}</text><text x="800" y="625" text-anchor="middle" font-size="28" font-family="Arial" fill="${textColor}">has successfully completed</text><text x="800" y="710" text-anchor="middle" font-size="48" font-family="Georgia" fill="${colors[1]}">${escapeXml(certificate.course)}</text><text x="800" y="850" text-anchor="middle" font-size="24" font-family="Arial" fill="${textColor}">Issued ${escapeXml(certificate.date)}  •  ID ${certificate.id}</text><image href="${qrDataUrl}" x="1350" y="840" width="150" height="150"/><text x="800" y="955" text-anchor="middle" font-size="18" font-family="Arial" fill="${textColor}" opacity=".7">Scan QR to verify this certificate</text>`;
     const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1100" viewBox="0 0 1600 1100">${background}${overlay}${customContent}</svg>`;
     const blob = new Blob([svg], { type: "image/svg+xml" });
     const url = URL.createObjectURL(blob);
@@ -190,7 +173,7 @@ export default function Home() {
     URL.revokeObjectURL(url);
   };
 
-  const handleTemplateUpload = async (event: ChangeEvent<HTMLInputElement>) => {
+  const handleTemplateUpload = (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
     const isImage = file.type.startsWith("image/") || /\.(png|jpe?g|svg)$/i.test(file.name);
@@ -198,25 +181,15 @@ export default function Home() {
       setNotice("Please upload a PNG, JPG or SVG template.");
       return;
     }
-    if (!supabase || !userId) return;
-    const name = file.name.replace(/\.[^/.]+$/, "");
-    const path = `${userId}/${crypto.randomUUID()}-${file.name}`;
-    const { error: uploadError } = await supabase.storage.from("certificate-templates").upload(path, file, { upsert: false });
-    if (uploadError) {
-      setNotice(`Could not upload template: ${uploadError.message}`);
-      return;
-    }
-    const { data: urlData } = supabase.storage.from("certificate-templates").getPublicUrl(path);
-    const colors = { background: "#ffffff", accent: "#145c4a", text: "#172521" };
-    const { data, error } = await supabase.from("templates").insert({ owner_id: userId, name, image_url: urlData.publicUrl, fields: { colors, typography: defaultTypography, layout: defaultCustomLayout, storagePath: path } }).select("id, name, image_url, fields").single();
-    if (error) {
-      setNotice(`Could not save template: ${error.message}`);
-      return;
-    }
-    const saved = { id: data.id, name: data.name, background: data.image_url, colors, typography: defaultTypography, layout: defaultCustomLayout, storagePath: path };
-    setTemplates((current) => [...current, saved]);
-    setTemplateIndex(templates.length);
-    setNotice("Template uploaded and saved.");
+    const reader = new FileReader();
+    reader.onload = () => {
+      const next = [...templates, { name: file.name.replace(/\.[^/.]+$/, ""), background: String(reader.result) }];
+      setTemplates(next);
+      setTemplateIndex(next.length - 1);
+      localStorage.setItem("certify-templates", JSON.stringify(next));
+      setNotice("Template uploaded and ready to use.");
+    };
+    reader.readAsDataURL(file);
   };
 
   const deleteTemplate = (index: number) => {
@@ -227,34 +200,19 @@ export default function Home() {
     }
     if (!window.confirm(`Delete the "${template.name}" template? This cannot be undone.`)) return;
     const next = templates.filter((_, itemIndex) => itemIndex !== index);
-    if (!template.id || !supabase) return;
-    void (async () => {
-      if (template.storagePath) {
-        const { error: storageError } = await supabase.storage.from("certificate-templates").remove([template.storagePath]);
-        if (storageError) {
-          setNotice(`Could not delete template file: ${storageError.message}`);
-          return;
-        }
-      }
-      const { error } = await supabase.from("templates").delete().eq("id", template.id).eq("owner_id", userId);
-      if (error) {
-        setNotice(`Could not delete template: ${error.message}`);
-        return;
-      }
-      setTemplates(next);
-      setTemplateIndex(Math.min(templateIndex, next.length - 1));
-      setNotice(`Template "${template.name}" deleted.`);
-    })();
+    const nextLayouts = { ...customLayouts };
+    delete nextLayouts[template.name];
+    setTemplates(next);
+    setCustomLayouts(nextLayouts);
+    localStorage.setItem("certify-templates", JSON.stringify(next));
+    localStorage.setItem("certify-template-layouts", JSON.stringify(nextLayouts));
+    setTemplateIndex(Math.min(templateIndex, next.length - 1));
+    setNotice(`Template "${template.name}" deleted.`);
   };
 
   const handleCsv = (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
-    if (!supabase || !userId) {
-      setNotice("Sign in before generating certificates from CSV.");
-      return;
-    }
-    const client = supabase;
     const reader = new FileReader();
     reader.onload = async () => {
       const rows = csvRows(String(reader.result));
@@ -269,12 +227,7 @@ export default function Home() {
         const id = (await createHash(`${recipient}|${achievement}|${issued}|${currentTemplate.name}`)).slice(0, 20).toUpperCase();
         return { id, name: recipient, course: achievement, date: issued, template: currentTemplate.name, createdAt: new Date().toISOString() };
       }));
-      const { error } = await client.from("certificates").insert(created.map((certificate) => ({ owner_id: userId, certificate_id: certificate.id, recipient_name: certificate.name, achievement: certificate.course, issue_date: certificate.date, verification_hash: certificate.id })));
-      if (error) {
-        setNotice(`Could not save CSV certificates: ${error.message}`);
-        return;
-      }
-      setCertificates([...created, ...certificates]);
+      saveCertificates([...created, ...certificates]);
       created.forEach((certificate) => void downloadCertificate(certificate));
       setNotice(`${created.length} certificates generated from CSV.`);
     };
@@ -312,8 +265,8 @@ export default function Home() {
         <div className="intro"><p className="eyebrow">CERTIFICATE STUDIO</p><h1>Make recognition<br /><em>unforgettable.</em></h1><p className="subhead">Design once, generate at scale, and give every certificate a tamper-evident identity.</p></div>
         <div className="steps"><span className="step-active">01 <b>Design</b></span><span>02 <b>Personalize</b></span><span>03 <b>Generate</b></span></div>
         <div className="studio-grid">
-          <TemplateSelector templates={templates} selectedIndex={templateIndex} onSelect={setTemplateIndex} onDelete={deleteTemplate} onUpload={handleTemplateUpload} onColorChange={updateTemplateColor} onTypographyChange={updateTemplateTypography} />
-          <DraggableTemplatePreview template={currentTemplate} layout={currentLayout} typography={currentTypography} name={name} course={course} date={date} index={templateIndex} onLayoutChange={updateLayout} onDragStart={startDragging} onDragEnd={() => setDragging(null)} />
+          <aside className="panel controls"><label className="section-label">01 / Choose a template</label><div className="template-list">{templates.map((template, index) => <div className="template-entry" key={template.name}><button className={`template-card ${index === templateIndex ? "selected" : ""}`} onClick={() => setTemplateIndex(index)}><span className={`template-swatch swatch-${index % 3}`}>{template.background && <img src={template.background} alt="" />}</span><span>{template.name}</span>{index === templateIndex && <b>✓</b>}</button>{template.background && <button className="delete-template" onClick={() => deleteTemplate(index)} aria-label={`Delete ${template.name}`}>Delete</button>}</div>)}</div><label className="upload-button">＋ Upload your template<input type="file" accept="image/png,image/jpeg,image/svg+xml" onChange={handleTemplateUpload} /></label><label className="section-label fields-label">02 / Certificate fields</label>{fields.map((field, index) => <div className="field-row" key={field}><span>⋮⋮</span><input value={field} onChange={(event) => setFields(fields.map((item, itemIndex) => itemIndex === index ? event.target.value : item))} /></div>)}<button className="add-field" onClick={() => setFields([...fields, `Custom field ${fields.length - 2}`])}>＋ Add field</button></aside>
+          <div className="preview-column"><div className={`certificate-preview preview-${templateIndex % 3} ${currentTemplate.background ? "uploaded-preview" : ""}`} onPointerMove={(event) => dragging && updateLayout(event)} onPointerUp={() => setDragging(null)} onPointerCancel={() => setDragging(null)} style={currentTemplate.background ? { backgroundImage: `linear-gradient(rgba(0,0,0,.18), rgba(0,0,0,.18)), url("${currentTemplate.background}")`, backgroundSize: "contain", backgroundColor: "#f7f7f4" } : undefined}>{currentTemplate.background ? <><div className="uploaded-details" style={{ left: `${currentLayout.box.x}%`, top: `${currentLayout.box.y}%` }} onPointerDown={(event) => { startDragging("box", event); event.stopPropagation(); }}><small>Awarded to</small><em>has successfully completed</em><span>{course || "Course or achievement"} · {date}</span></div><strong className="uploaded-name" style={{ left: `${currentLayout.name.x}%`, top: `${currentLayout.name.y}%` }} onPointerDown={(event) => { startDragging("name", event); event.stopPropagation(); }}>{name || "Recipient name"}</strong></> : <div className="preview-border"><div className="seal">✦</div><p className="preview-kicker">CERTIFICATE OF ACHIEVEMENT</p><h2>{name || "Recipient name"}</h2><p>has successfully completed</p><strong>{course || "Course or achievement"}</strong><small>Issued {date || "YYYY-MM-DD"}</small></div>}</div><p className="preview-caption">{currentTemplate.background ? "Drag the name or details box to position it" : `Live preview · ${currentTemplate.name}`}</p></div>
           <aside className="panel personalize"><label className="section-label">03 / Personalize</label><p className="signed-in">✓ Authenticated club lead</p><label>Recipient name<input placeholder="e.g. Aisha Sharma" value={name} onChange={(event) => setName(event.target.value)} /></label><label>Course or achievement<input placeholder="e.g. Advanced Design" value={course} onChange={(event) => setCourse(event.target.value)} /></label><label>Issue date<input type="date" value={date} onChange={(event) => setDate(event.target.value)} /></label><button className="primary-button" onClick={() => issueCertificate(name, course, date)}>Generate certificate <span>↗</span></button><div className="bulk-box"><div><b>Generate in bulk</b><p>Upload a CSV with <code>name, course, date</code> columns.</p></div><label className="secondary-button">Upload CSV<input type="file" accept=".csv,text/csv" onChange={handleCsv} /></label></div></aside>
         </div>
         {notice && <p className="notice">{notice}</p>}
